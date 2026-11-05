@@ -30,6 +30,7 @@ def solve_simplex_step_by_step(c, A, b):
     table[:m, -1] = b
     table[-1, :n] = -c
 
+    initial_table = table.copy()
     iterations = []
     iteration = 1
     max_iter = 50
@@ -50,6 +51,7 @@ def solve_simplex_step_by_step(c, A, b):
                 "success": False,
                 "message": "El problema es no acotado: no hay fila pivote válida.",
                 "iterations": iterations,
+                "initial_table": initial_table,
                 "table": table,
             }
 
@@ -65,6 +67,8 @@ def solve_simplex_step_by_step(c, A, b):
             "iteracion": iteration,
             "fila_pivote": row_pivot + 1,
             "columna_pivote": col_pivot + 1,
+            "razones": [float(value) if np.isfinite(value) else None for value in ratios],
+            "elemento_pivote": float(pivot_value),
             "tabla": table.copy(),
         })
         iteration += 1
@@ -74,6 +78,7 @@ def solve_simplex_step_by_step(c, A, b):
             "success": False,
             "message": "Se excedió el número máximo de iteraciones.",
             "iterations": iterations,
+            "initial_table": initial_table,
             "table": table,
         }
 
@@ -88,6 +93,7 @@ def solve_simplex_step_by_step(c, A, b):
         "message": "Solución óptima encontrada.",
         "objective_value": float(table[-1, -1]),
         "solution": solution,
+        "initial_table": initial_table,
         "iterations": iterations,
         "table": table,
     }
@@ -242,11 +248,26 @@ def optimize_nonlinear_function(
         if inequalities or equalities:
             raise ValueError("BFGS y Nelder-Mead se ofrecen sin restricciones; selecciona SLSQP para restricciones.")
         scipy_method = "BFGS" if method.startswith("BFGS") else "Nelder-Mead"
+        iteration_trace = [{
+            "iteracion": 0,
+            "punto": np.asarray(initial_values, dtype=float).copy(),
+            "valor": objective(np.asarray(initial_values, dtype=float)),
+        }]
+
+        def record_iteration(point):
+            point = np.asarray(point, dtype=float).copy()
+            iteration_trace.append({
+                "iteracion": len(iteration_trace),
+                "punto": point,
+                "valor": objective(point),
+            })
+
         result = opt.minimize(
             optimization_objective,
             np.asarray(initial_values, dtype=float),
             jac=objective_gradient if scipy_method == "BFGS" else None,
             method=scipy_method,
+            callback=record_iteration,
         )
         return [{
             "success": bool(result.success),
@@ -254,6 +275,19 @@ def optimize_nonlinear_function(
             "point": np.asarray(result.x, dtype=float),
             "value": objective(result.x),
             "iterations": int(getattr(result, "nit", 0)),
+            "procedure": {
+                "kind": "iterations",
+                "title": f"Iteraciones de {scipy_method}",
+                "method": (
+                    "BFGS aproxima el Hessiano inverso y actualiza la dirección de búsqueda."
+                    if scipy_method == "BFGS"
+                    else "Nelder-Mead transforma y compara los vértices de un simplex en cada iteración."
+                ),
+                "objective": str(objective_expr),
+                "optimization_objective": str(optimization_expr),
+                "objective_type": objective_type,
+                "rows": iteration_trace,
+            },
         }]
 
     if method == "Descenso de gradiente (iterativo)":
@@ -262,10 +296,17 @@ def optimize_nonlinear_function(
         point = np.asarray(initial_values, dtype=float)
         max_iterations = 2000
         tolerance = 1e-7
+        iteration_trace = []
         for iteration in range(1, max_iterations + 1):
             grad = objective_gradient(point)
             if not np.all(np.isfinite(grad)):
                 raise ValueError("El gradiente produjo valores no finitos.")
+            iteration_trace.append({
+                "iteracion": iteration - 1,
+                "punto": point.copy(),
+                "valor": objective(point),
+                "norma_gradiente": float(np.linalg.norm(grad)),
+            })
             if np.linalg.norm(grad) < tolerance:
                 return [{
                     "success": True,
@@ -273,6 +314,16 @@ def optimize_nonlinear_function(
                     "point": point,
                     "value": objective(point),
                     "iterations": iteration - 1,
+                    "procedure": {
+                        "kind": "iterations",
+                        "title": "Iteraciones de descenso de gradiente",
+                        "method": (
+                            "x(k+1) = x(k) - α∇f(x(k)); α se selecciona con búsqueda lineal."
+                        ),
+                        "objective": str(objective_expr),
+                        "objective_type": objective_type,
+                        "rows": iteration_trace,
+                    },
                 }]
 
             step = 1.0
@@ -285,6 +336,8 @@ def optimize_nonlinear_function(
                 step *= 0.5
             if step <= 1e-10:
                 break
+            iteration_trace[-1]["paso"] = step
+            iteration_trace[-1]["punto_siguiente"] = candidate.copy()
             point = candidate
 
         return [{
@@ -293,6 +346,16 @@ def optimize_nonlinear_function(
             "point": point,
             "value": objective(point),
             "iterations": iteration,
+            "procedure": {
+                "kind": "iterations",
+                "title": "Iteraciones de descenso de gradiente",
+                "method": (
+                    "x(k+1) = x(k) - α∇f(x(k)); α se selecciona con búsqueda lineal."
+                ),
+                "objective": str(objective_expr),
+                "objective_type": objective_type,
+                "rows": iteration_trace,
+            },
         }]
 
     if method == "SLSQP (numérico con restricciones)":
@@ -309,6 +372,20 @@ def optimize_nonlinear_function(
                 "type": "eq",
                 "fun": lambda point, fn=constraint_func: float(fn(*point)),
             })
+        iteration_trace = [{
+            "iteracion": 0,
+            "punto": np.asarray(initial_values, dtype=float).copy(),
+            "valor": objective(np.asarray(initial_values, dtype=float)),
+        }]
+
+        def record_slsqp_iteration(point):
+            point = np.asarray(point, dtype=float).copy()
+            iteration_trace.append({
+                "iteracion": len(iteration_trace),
+                "punto": point,
+                "valor": objective(point),
+            })
+
         result = opt.minimize(
             optimization_objective,
             np.asarray(initial_values, dtype=float),
@@ -316,6 +393,7 @@ def optimize_nonlinear_function(
             method="SLSQP",
             constraints=scipy_constraints,
             options={"maxiter": 1000, "ftol": 1e-9},
+            callback=record_slsqp_iteration,
         )
         return [{
             "success": bool(result.success),
@@ -323,6 +401,18 @@ def optimize_nonlinear_function(
             "point": np.asarray(result.x, dtype=float),
             "value": objective(result.x),
             "iterations": int(getattr(result, "nit", 0)),
+            "procedure": {
+                "kind": "iterations",
+                "title": "Iteraciones de SLSQP",
+                "method": "SLSQP combina aproximaciones cuadráticas locales con búsqueda lineal y restricciones.",
+                "objective": str(objective_expr),
+                "optimization_objective": str(optimization_expr),
+                "objective_type": objective_type,
+                "constraints": [
+                    str(expr) + " <= 0" for expr in inequalities
+                ] + [str(expr) + " = 0" for expr in equalities],
+                "rows": iteration_trace,
+            },
         }]
 
     if method in ("Multiplicadores de Lagrange", "Condiciones KKT"):
@@ -334,6 +424,9 @@ def optimize_nonlinear_function(
             raise ValueError("KKT admite hasta 8 restricciones de desigualdad para enumerar conjuntos activos.")
 
         objective_gradient_expr = [sp.diff(optimization_expr, symbol) for symbol in symbols]
+        objective_gradient_functions = [
+            sp.lambdify(symbols, expr, modules="numpy") for expr in objective_gradient_expr
+        ]
         all_candidates = []
         active_sets = (
             [()] if method == "Multiplicadores de Lagrange"
@@ -388,6 +481,63 @@ def optimize_nonlinear_function(
                     "value": objective(point),
                     "iterations": int(getattr(root_result, "nfev", 0)),
                     "active_constraints": [index + 1 for index in active_set],
+                    "procedure": {
+                        "kind": "equations",
+                        "title": "Sistema de optimalidad y verificación",
+                        "method": method,
+                        "objective": str(objective_expr),
+                        "optimization_objective": str(optimization_expr),
+                        "objective_type": objective_type,
+                        "equalities": [str(expr) + " = 0" for expr in equalities],
+                        "inequalities": [str(expr) + " <= 0" for expr in inequalities],
+                        "active_inequalities": [
+                            str(expr) + " = 0" for expr in active_inequalities
+                        ],
+                        "stationarity": [str(expr) + " = 0" for expr in stationarity],
+                        "multipliers": [
+                            {
+                                "name": str(multiplier),
+                                "value": float(value),
+                                "constraint": str(constraint_exprs[index]),
+                            }
+                            for index, (multiplier, value) in enumerate(
+                                zip(multipliers, multiplier_values)
+                            )
+                        ],
+                        "gradient": [
+                            float(function(*point))
+                            for function in objective_gradient_functions
+                        ],
+                        "stationarity_residuals": [
+                            float(function(*solution))
+                            for function in equation_functions[:len(symbols)]
+                        ],
+                        "constraint_residuals": [
+                            {"restriccion": str(expr), "residuo": float(function(*point))}
+                            for expr, function in zip(
+                                equalities + inequalities,
+                                (
+                                    sp.lambdify(symbols, expr, modules="numpy")
+                                    for expr in equalities + inequalities
+                                ),
+                            )
+                        ],
+                        "complementarity": [
+                            {
+                                "desigualdad": index + 1,
+                                "g(x)": float(
+                                    sp.lambdify(symbols, inequalities[index], modules="numpy")(*point)
+                                ),
+                                "multiplicador": float(multiplier),
+                                "lambda*g(x)": float(
+                                    multiplier
+                                    * sp.lambdify(symbols, inequalities[index], modules="numpy")(*point)
+                                ),
+                            }
+                            for index, multiplier in zip(active_set, inequality_multipliers)
+                        ],
+                        "active_constraints": [index + 1 for index in active_set],
+                    },
                 })
             except (FloatingPointError, ValueError, OverflowError):
                 continue
@@ -420,6 +570,13 @@ def calculate_eoq_classic(demand, setup_cost, holding_cost):
         "n_orders": n_orders,
         "time_between_orders": time_between_orders,
         "total_cost": total_cost,
+        "procedure": [
+            f"Datos: D = {D:g} unidades/año, S = {S:g} por pedido, H = {H:g} por unidad/año.",
+            f"Cantidad económica: Q* = √(2DS/H) = √(2·{D:g}·{S:g}/{H:g}) = {q_opt:.4f}.",
+            f"Pedidos por año: N = D/Q* = {D:g}/{q_opt:.4f} = {n_orders:.4f}.",
+            f"Tiempo entre pedidos: T = 365/N = 365/{n_orders:.4f} = {time_between_orders:.4f} días.",
+            f"Costo anual relevante: CT = √(2DSH) = {total_cost:.4f}.",
+        ],
     }
 
 
@@ -438,6 +595,13 @@ def calculate_eoq_shortage(demand, setup_cost, holding_cost, shortage_cost):
         "s_max": s_max,
         "f_max": f_max,
         "total_cost": total_cost,
+        "procedure": [
+            f"Datos: D = {D:g}, S = {S:g}, H = {H:g}, B = {B:g}.",
+            f"Lote óptimo: Q* = √[(2DS/H)((H+B)/B)] = {q_opt:.4f}.",
+            f"Inventario máximo: Imax = √[(2DS/H)(B/(H+B))] = {s_max:.4f}.",
+            f"Faltante máximo: Fmax = Q* - Imax = {q_opt:.4f} - {s_max:.4f} = {f_max:.4f}.",
+            f"Costo anual relevante: CT = √[2DSH(B/(H+B))] = {total_cost:.4f}.",
+        ],
     }
 
 
@@ -464,6 +628,14 @@ def calculate_mm1(lmbda, mu):
         "l": l,
         "wq": wq,
         "w": w,
+        "procedure": [
+            f"Utilización: ρ = λ/μ = {lam:g}/{m:g} = {rho:.6f}; se verifica ρ < 1.",
+            f"Probabilidad de sistema vacío: P0 = 1 - ρ = {p0:.6f}.",
+            f"Clientes esperados en cola: Lq = λ²/[μ(μ-λ)] = {lq:.6f}.",
+            f"Clientes esperados en el sistema: L = λ/(μ-λ) = {l:.6f}.",
+            f"Tiempo de espera en cola (Little): Wq = Lq/λ = {wq:.6f}.",
+            f"Tiempo en el sistema (Little): W = L/λ = {w:.6f}.",
+        ],
     }
 
 
@@ -492,7 +664,107 @@ def calculate_mmk(lmbda, mu, servers):
         "l": l,
         "wq": wq,
         "w": w,
+        "procedure": [
+            f"Utilización por servidor: ρ = λ/(kμ) = {lam:g}/({k}·{m:g}) = {rho:.6f}; se verifica ρ < 1.",
+            f"Normalización: P0 = 1/[Σ(n=0..k-1) (λ/μ)^n/n! + (λ/μ)^k/(k!(1-ρ))] "
+            f"= 1/[{sum_terms:.6f} + {last_term:.6f}] = {p0:.6f}.",
+            f"Clientes esperados en cola: Lq = P0(λ/μ)^kρ/[k!(1-ρ)²] = {lq:.6f}.",
+            f"Clientes esperados en el sistema: L = Lq + λ/μ = {lq:.6f} + {lam / m:.6f} = {l:.6f}.",
+            f"Tiempo de espera en cola (Little): Wq = Lq/λ = {wq:.6f}.",
+            f"Tiempo en el sistema (Little): W = L/λ = {w:.6f}.",
+        ],
+        "normalization_terms": [
+            {"n": n, "term": (lam / m) ** n / math.factorial(n)}
+            for n in range(k)
+        ],
     }
+
+
+def show_procedure(procedure):
+    with st.expander("Ver procedimiento de cálculo"):
+        if procedure["kind"] in ("steps", "graph"):
+            for index, step in enumerate(procedure["steps"], start=1):
+                st.markdown(f"{index}. {step}")
+            if procedure.get("rows"):
+                st.dataframe(procedure["rows"], width="stretch")
+            if procedure.get("note"):
+                st.caption(procedure["note"])
+        elif procedure["kind"] == "iterations":
+            st.markdown(f"**{procedure['title']}**")
+            for key in ("method", "objective", "optimization_objective"):
+                if key in procedure:
+                    st.markdown(f"**{key.replace('_', ' ').capitalize()}:** `{procedure[key]}`")
+            if procedure.get("constraints"):
+                st.markdown("**Restricciones utilizadas:**")
+                st.write(procedure["constraints"])
+            if procedure.get("objective_type") == "Maximizar":
+                st.caption(
+                    "El algoritmo minimiza el negativo de f(x) para encontrar el máximo; "
+                    "los valores mostrados corresponden a f(x)."
+                )
+            rows = []
+            for entry in procedure["rows"]:
+                row = {
+                    key: value
+                    for key, value in entry.items()
+                    if key not in ("punto", "punto_siguiente")
+                }
+                row.update({
+                    f"x{index + 1}": float(value)
+                    for index, value in enumerate(entry["punto"])
+                })
+                if "punto_siguiente" in entry:
+                    row.update({
+                        f"x{index + 1}_siguiente": float(value)
+                        for index, value in enumerate(entry["punto_siguiente"])
+                    })
+                rows.append(row)
+            st.dataframe(rows, width="stretch")
+        elif procedure["kind"] == "equations":
+            st.markdown(f"**Método:** {procedure['method']}")
+            st.markdown(f"**Objetivo original:** `{procedure['objective']}`")
+            st.markdown(
+                f"**Función optimizada para las condiciones de primer orden:** "
+                f"`{procedure['optimization_objective']}`"
+            )
+            st.markdown("**Gradiente del objetivo transformado en el candidato:**")
+            st.write(procedure["gradient"])
+            if procedure["equalities"]:
+                st.markdown("**Restricciones de igualdad:**")
+                st.write(procedure["equalities"])
+            if procedure["inequalities"]:
+                st.markdown("**Desigualdades normalizadas como g(x) ≤ 0:**")
+                st.write(procedure["inequalities"])
+            if procedure["active_inequalities"]:
+                st.markdown("**Restricciones activas para este candidato:**")
+                st.write(procedure["active_inequalities"])
+            st.markdown("**Ecuaciones de estacionariedad del Lagrangiano:**")
+            st.write(procedure["stationarity"])
+            if procedure["multipliers"]:
+                st.markdown("**Multiplicadores obtenidos numéricamente:**")
+                st.dataframe(procedure["multipliers"], width="stretch")
+            st.markdown("**Residuo de estacionariedad:**")
+            st.write(procedure["stationarity_residuals"])
+            st.markdown("**Residuos de las restricciones:**")
+            if procedure["constraint_residuals"]:
+                st.dataframe(procedure["constraint_residuals"], width="stretch")
+            else:
+                st.caption("El modelo no tiene restricciones explícitas.")
+            if procedure["method"] == "Condiciones KKT":
+                st.markdown("**Verificación de complementariedad:**")
+                if procedure["complementarity"]:
+                    st.dataframe(procedure["complementarity"], width="stretch")
+                else:
+                    st.caption("No hay restricciones de desigualdad para comprobar.")
+                st.caption(
+                    "Se enumeran conjuntos activos; las desigualdades inactivas tienen "
+                    "multiplicador cero y se verifica el signo de los multiplicadores activos."
+                )
+            if procedure["active_constraints"]:
+                st.write(
+                    "Índices de desigualdades activas: "
+                    f"{procedure['active_constraints']} (numeración según el orden ingresado)."
+                )
 
 
 # ---------------------------------------------------------
@@ -568,8 +840,50 @@ if modulo == "1. Programación Lineal":
                 st.metric(label="Valor Óptimo Z", value=f"{z_val:.4f}")
                 for i, val in enumerate(res.x):
                     st.write(f"**x{i+1}** = {val:.4f}")
+                objective_expression = " + ".join(
+                    f"({coefficient:g})x{index + 1}"
+                    for index, coefficient in enumerate(c_arr)
+                )
+                constraint_steps = [
+                    f"Restricción {index + 1}: "
+                    + " + ".join(
+                        f"({coefficient:g})x{variable + 1}"
+                        for variable, coefficient in enumerate(row)
+                    )
+                    + f" ≤ {rhs:g}; holgura = {slack:.6g}."
+                    for index, (row, rhs, slack) in enumerate(
+                        zip(A_arr, b_arr, b_arr - A_arr @ res.x)
+                    )
+                ]
+                show_procedure({
+                    "kind": "steps",
+                    "steps": [
+                        f"Función objetivo: {'max' if tipo_opt == 'Maximizar' else 'min'} "
+                        + f" Z = {objective_expression}.",
+                        "Se cambia el signo de los coeficientes del objetivo al maximizar "
+                        "para convertir el problema a minimización interna de linprog."
+                        if tipo_opt == "Maximizar"
+                        else "La función objetivo se resuelve directamente como minimización.",
+                        "Se resolvió el modelo con scipy.optimize.linprog, con xᵢ ≥ 0 "
+                        "y restricciones de tipo ≤.",
+                        "Punto óptimo: "
+                        + ", ".join(
+                            f"x{index + 1} = {value:.6g}"
+                            for index, value in enumerate(res.x)
+                        )
+                        + f"; valor del objetivo = {z_val:.6g}.",
+                        *constraint_steps,
+                    ],
+                })
             else:
                 st.error("No se encontró una solución factible u óptima.")
+                show_procedure({
+                    "kind": "steps",
+                    "steps": [
+                        f"El solver terminó con estado {res.status}: {res.message}.",
+                        "No se reporta un punto óptimo porque el modelo no produjo una solución óptima finita.",
+                    ],
+                })
 
         elif modo == "Método Gráfico (2 variables)":
             if len(c_arr) != 2:
@@ -589,11 +903,34 @@ if modulo == "1. Programación Lineal":
                     st.error(f"No se pudo resolver el modelo: {solver_result.message}")
 
                 if vertices:
-                    st.write("Vértices factibles:")
-                    st.dataframe(
-                        [{"x1": float(point[0]), "x2": float(point[1]), "Z": float(c_arr @ point)}
-                         for point in vertices]
+                    vertex_rows = [
+                        {"x1": float(point[0]), "x2": float(point[1]), "Z": float(c_arr @ point)}
+                        for point in vertices
+                    ]
+                else:
+                    vertex_rows = []
+                graphical_steps = [
+                    f"Se trazan las fronteras de las restricciones: "
+                    + "; ".join(
+                        f"{row[0]:g}x1 + {row[1]:g}x2 = {rhs:g}"
+                        for row, rhs in zip(A_arr, b_arr)
                     )
+                    + ", junto con x1 = 0 y x2 = 0.",
+                    "Se intersectan las rectas por pares, se descartan intersecciones "
+                    "no factibles y se evalúa el objetivo en cada vértice factible.",
+                    (
+                        f"Óptimo: (x1, x2) = ({solver_result.x[0]:.6g}, "
+                        f"{solver_result.x[1]:.6g}), Z = {result['objective_value']:.6g}."
+                        if solver_result.success
+                        else "No se encontró un óptimo finito; revisar el estado de factibilidad y acotación mostrado arriba."
+                    ),
+                ]
+                show_procedure({
+                    "kind": "graph",
+                    "steps": graphical_steps,
+                    "rows": vertex_rows,
+                    "note": "La búsqueda de intersecciones factibles y la selección del óptimo se verifican con el solver lineal.",
+                })
 
                 vertex_array = np.asarray(vertices) if vertices else np.empty((0, 2))
                 max_x = max(10.0, float(vertex_array[:, 0].max()) * 1.25) if len(vertices) else 10.0
@@ -651,13 +988,35 @@ if modulo == "1. Programación Lineal":
                 result = solve_simplex_step_by_step(c_arr, A_arr, b_arr)
                 if not result["success"]:
                     st.error(result["message"])
+                    with st.expander("Ver procedimiento Simplex"):
+                        st.markdown("**Tabla inicial**")
+                        st.dataframe(result["initial_table"])
+                        for step in result["iterations"]:
+                            st.markdown(f"**Iteración {step['iteracion']}**")
+                            st.write(
+                                f"Columna pivote {step['columna_pivote']}, fila pivote "
+                                f"{step['fila_pivote']}, razones {step['razones']}."
+                            )
+                            st.dataframe(step["tabla"])
                 else:
-                    st.markdown("### Tabla Inicial y iteraciones")
-                    st.dataframe(result["table"])
-                    for step in result["iterations"]:
-                        st.markdown(f"### Iteración {step['iteracion']}")
-                        st.write(f"Pivote en Fila {step['fila_pivote']}, Columna {step['columna_pivote']}")
-                        st.dataframe(step["tabla"])
+                    with st.expander("Ver procedimiento Simplex paso a paso"):
+                        st.markdown("**Tabla inicial**")
+                        st.dataframe(result["initial_table"])
+                        for step in result["iterations"]:
+                            st.markdown(f"**Iteración {step['iteracion']}**")
+                            st.write(
+                                f"Entra la variable de la columna {step['columna_pivote']}; "
+                                f"sale la variable de la fila {step['fila_pivote']}. "
+                                f"Elemento pivote = {step['elemento_pivote']:.6g}."
+                            )
+                            st.write(
+                                "Razones para escoger la fila pivote: "
+                                f"{step['razones']}."
+                            )
+                            st.dataframe(step["tabla"])
+                        st.caption(
+                            "Se repite el pivoteo hasta que no quedan costos reducidos negativos."
+                        )
                     st.success(f"**Valor Óptimo Z** = {result['objective_value']:.4f}")
                     for i, val in enumerate(result["solution"]):
                         st.write(f"**x{i+1}** = {val:.4f}")
@@ -740,6 +1099,8 @@ elif modulo == "2. Programación No Lineal (NLP)":
                     st.write(f"Iteraciones/evaluaciones: {result['iterations']}")
                     if "active_constraints" in result:
                         st.write(f"Restricciones activas: {result['active_constraints']}")
+                    if "procedure" in result:
+                        show_procedure(result["procedure"])
         except (ValueError, SyntaxError, TypeError, OverflowError) as e:
             st.error(f"Error al evaluar la expresión matemática: {e}")
 
@@ -775,6 +1136,7 @@ elif modulo == "3. Control de Inventarios (EOQ)":
                 c2.metric("N° de Pedidos al año (N)", f"{N:.2f}")
                 c3.metric("Tiempo entre pedidos (T)", f"{T:.1f} días")
                 st.write(f"**Costo Total Anual de Inventario:** ${TC:.2f}")
+                show_procedure({"kind": "steps", "steps": result["procedure"]})
 
                 fig, ax = plt.subplots(figsize=(8, 3))
                 t_vals = np.linspace(0, 3, 300)
@@ -798,6 +1160,7 @@ elif modulo == "3. Control de Inventarios (EOQ)":
                 c2.metric("Inventario Máximo (S*)", f"{S_max:.2f} u")
                 c3.metric("Faltante Máximo (F*)", f"{F_max:.2f} u")
                 st.write(f"**Costo Total Anual de Inventario:** ${TC:.2f}")
+                show_procedure({"kind": "steps", "steps": result["procedure"]})
         except ValueError as e:
             st.error(str(e))
 
@@ -843,5 +1206,12 @@ elif modulo == "4. Líneas de Espera (Teoría de Colas)":
             c5, c6 = st.columns(2)
             c5.metric("Tiempo Medio en Cola (Wq)", f"{wq:.3f} unidades de tiempo")
             c6.metric("Tiempo Medio en Sistema (W)", f"{w:.3f} unidades de tiempo")
+            queue_procedure = {"kind": "steps", "steps": result["procedure"]}
+            if "normalization_terms" in result:
+                queue_procedure["rows"] = result["normalization_terms"]
+                queue_procedure["note"] = (
+                    "Cada término es (λ/μ)^n/n! en la suma de normalización de P0."
+                )
+            show_procedure(queue_procedure)
         except ValueError as e:
             st.error(str(e))
