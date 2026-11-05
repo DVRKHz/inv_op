@@ -210,17 +210,30 @@ def parse_nonlinear_constraints(text, variable_names):
             raise ValueError(f"Restricción en línea {line_number}: {exc}") from exc
     return inequalities, equalities
 
-def optimize_nonlinear_function(expr_str, initial_values, method, constraints_text=""):
-    """Resuelve un problema de minimización NLP de dimensión configurable."""
+def optimize_nonlinear_function(
+    expr_str,
+    initial_values,
+    method,
+    constraints_text="",
+    objective_type="Minimizar",
+):
+    """Resuelve un problema NLP configurable de minimización o maximización."""
+    if objective_type not in ("Minimizar", "Maximizar"):
+        raise ValueError("El tipo de objetivo debe ser Minimizar o Maximizar.")
+    optimization_sign = 1.0 if objective_type == "Minimizar" else -1.0
     variable_names = [f"x{i + 1}" for i in range(len(initial_values))]
     objective_expr, symbols = parse_math_expression(expr_str, variable_names)
     inequalities, equalities = parse_nonlinear_constraints(constraints_text, variable_names)
     function = sp.lambdify(symbols, objective_expr, modules="numpy")
-    gradient_expr = [sp.diff(objective_expr, symbol) for symbol in symbols]
+    optimization_expr = optimization_sign * objective_expr
+    gradient_expr = [sp.diff(optimization_expr, symbol) for symbol in symbols]
     gradient = sp.lambdify(symbols, gradient_expr, modules="numpy")
 
     def objective(point):
         return float(function(*point))
+
+    def optimization_objective(point):
+        return optimization_sign * objective(point)
 
     def objective_gradient(point):
         return np.asarray(gradient(*point), dtype=float)
@@ -230,7 +243,7 @@ def optimize_nonlinear_function(expr_str, initial_values, method, constraints_te
             raise ValueError("BFGS y Nelder-Mead se ofrecen sin restricciones; selecciona SLSQP para restricciones.")
         scipy_method = "BFGS" if method.startswith("BFGS") else "Nelder-Mead"
         result = opt.minimize(
-            objective,
+            optimization_objective,
             np.asarray(initial_values, dtype=float),
             jac=objective_gradient if scipy_method == "BFGS" else None,
             method=scipy_method,
@@ -239,7 +252,7 @@ def optimize_nonlinear_function(expr_str, initial_values, method, constraints_te
             "success": bool(result.success),
             "message": str(result.message),
             "point": np.asarray(result.x, dtype=float),
-            "value": float(result.fun),
+            "value": objective(result.x),
             "iterations": int(getattr(result, "nit", 0)),
         }]
 
@@ -263,10 +276,10 @@ def optimize_nonlinear_function(expr_str, initial_values, method, constraints_te
                 }]
 
             step = 1.0
-            current_value = objective(point)
+            current_value = optimization_objective(point)
             while step > 1e-10:
                 candidate = point - step * grad
-                candidate_value = objective(candidate)
+                candidate_value = optimization_objective(candidate)
                 if np.isfinite(candidate_value) and candidate_value <= current_value - 1e-4 * step * np.dot(grad, grad):
                     break
                 step *= 0.5
@@ -297,7 +310,7 @@ def optimize_nonlinear_function(expr_str, initial_values, method, constraints_te
                 "fun": lambda point, fn=constraint_func: float(fn(*point)),
             })
         result = opt.minimize(
-            objective,
+            optimization_objective,
             np.asarray(initial_values, dtype=float),
             jac=objective_gradient,
             method="SLSQP",
@@ -308,7 +321,7 @@ def optimize_nonlinear_function(expr_str, initial_values, method, constraints_te
             "success": bool(result.success),
             "message": str(result.message),
             "point": np.asarray(result.x, dtype=float),
-            "value": float(result.fun),
+            "value": objective(result.x),
             "iterations": int(getattr(result, "nit", 0)),
         }]
 
@@ -320,7 +333,7 @@ def optimize_nonlinear_function(expr_str, initial_values, method, constraints_te
         if len(inequalities) > 8:
             raise ValueError("KKT admite hasta 8 restricciones de desigualdad para enumerar conjuntos activos.")
 
-        objective_gradient_expr = [sp.diff(objective_expr, symbol) for symbol in symbols]
+        objective_gradient_expr = [sp.diff(optimization_expr, symbol) for symbol in symbols]
         all_candidates = []
         active_sets = (
             [()] if method == "Multiplicadores de Lagrange"
@@ -654,7 +667,13 @@ if modulo == "1. Programación Lineal":
 # ---------------------------------------------------------
 elif modulo == "2. Programación No Lineal (NLP)":
     st.header("2. Programación No Lineal (NLP)")
-    st.write("Minimización multivariable con métodos numéricos, iterativos y condiciones de optimalidad.")
+    st.write("Optimización multivariable con métodos numéricos, iterativos y condiciones de optimalidad.")
+
+    objective_type = st.selectbox(
+        "Tipo de optimización:",
+        ["Minimizar", "Maximizar"],
+        key="nlp_objective_type",
+    )
 
     num_nlp_vars = st.number_input("Número de variables:", min_value=1, max_value=10, value=2, key="nlp_num_vars")
     variable_names = [f"x{i + 1}" for i in range(num_nlp_vars)]
@@ -697,7 +716,13 @@ elif modulo == "2. Programación No Lineal (NLP)":
 
     if st.button("Resolver NLP"):
         try:
-            results = optimize_nonlinear_function(expr_str, initial_values, method, constraints_text)
+            results = optimize_nonlinear_function(
+                expr_str,
+                initial_values,
+                method,
+                constraints_text,
+                objective_type,
+            )
             if not results:
                 st.warning("No se encontraron candidatos KKT/Lagrange factibles desde el punto inicial.")
             else:
